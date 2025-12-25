@@ -8,6 +8,10 @@ import (
 )
 
 func main() {
+
+	if err := ConnectDB(); err != nil {
+        log.Fatal("Database connection failed:", err)
+    }
 	// Declare the app
 	app := fiber.New()
 
