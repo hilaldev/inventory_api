@@ -7,6 +7,12 @@ import (
 )
 
 func main() {
+    port := os.Getenv("PORT")
+    if port == "" {
+        port = "3000"
+    }
+    log.Fatal(app.Listen(":" + port))
+
     if err := ConnectDB(); err != nil {
         log.Fatal(err)
     }
