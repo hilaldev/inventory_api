@@ -2,19 +2,31 @@ package main
 
 import (
 	"context"
+	"log"
 	"os"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-var DB *pgxpool.Pool
-
-func ConnectDB() error {
+func ConnectDB() *pgxpool.Pool {
 	dsn := os.Getenv("DATABASE_URL")
-	pool, err := pgxpool.New(context.Background(), dsn)
-	if err != nil {
-		return err
+	if dsn == "" {
+		log.Fatal("DATABASE_URL is not set")
 	}
-	DB = pool
-	return nil
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	pool, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		log.Fatalf("Failed to create pool: %v", err)
+	}
+
+	if err := pool.Ping(ctx); err != nil {
+		log.Fatalf("Failed to ping database: %v", err)
+	}
+
+	log.Println("Database connected successfully")
+	return pool
 }
