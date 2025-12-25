@@ -1,14 +1,14 @@
 package main
 
-import "time"
+//import "time"
 
 type LockRequest struct {
-    SKU      string `json:"sku"`
-    Quantity int    `json:"quantity"`
-    OrderRef string `json:"order_ref"`
-    TTL      int    `json:"ttl"` // seconds
+	SKU      string `json:"sku"`
+	Quantity int    `json:"quantity"`
+	OrderRef string `json:"order_ref"`
+	TTL      int    `json:"ttl"` // seconds
 }
 
 type ConfirmRequest struct {
-    LockID string `json:"lock_id"`
+	LockID string `json:"lock_id"`
 }
