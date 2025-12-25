@@ -13,6 +13,10 @@ type Handler struct {
 }
 
 func (h *Handler) LockInventory(c *fiber.Ctx) error {
+	if h.DB == nil {
+		return fiber.NewError(500, "database not initialized")
+	}
+
 	ctx := context.Background()
 
 	tx, err := h.DB.Begin(ctx)
