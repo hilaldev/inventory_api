@@ -25,26 +25,28 @@ func (h *Handler) LockInventory(c *fiber.Ctx) error {
 
 	tx, err := h.DB.Begin(ctx)
 	if err != nil {
-		return fiber.NewError(500, "failed to start transaction: "+err.Error())
+	    return fiber.NewError(500, err.Error())
 	}
 	defer tx.Rollback(ctx)
-
+	
 	lockID := uuid.New()
-
+	
+	// Use the correct column names from your table
 	_, err = tx.Exec(ctx,
-		`INSERT INTO inventory_locks (id, sku, quantity, order_ref, ttl) VALUES ($1,$2,$3,$4,$5)`,
-		lockID, req.SKU, req.Quantity, req.OrderRef, req.TTL,
+	    `INSERT INTO inventory_locks (lock_id, sku, qty, order_ref, expires_at) VALUES ($1, $2, $3, $4, $5)`,
+	    lockID, req.SKU, req.Quantity, req.OrderRef, time.Now().Add(time.Duration(req.TTL)*time.Second),
 	)
 	if err != nil {
-		return fiber.NewError(500, "failed to insert lock: "+err.Error())
+	    return fiber.NewError(500, "failed to insert lock: "+err.Error())
 	}
-
+	
 	if err := tx.Commit(ctx); err != nil {
-		return fiber.NewError(500, "failed to commit transaction: "+err.Error())
+	    return fiber.NewError(500, err.Error())
 	}
-
+	
 	return c.JSON(fiber.Map{
-		"lock_id": lockID,
-		"status":  "locked",
+	    "lock_id": lockID,
+	    "status":  "locked",
 	})
+
 }
