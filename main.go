@@ -1,28 +1,27 @@
 package main
 
 import (
-    "log"
+	"log"
+	"os"
 
-    "github.com/gofiber/fiber/v2"
+	"github.com/gofiber/fiber/v2"
 )
 
 func main() {
-    port := os.Getenv("PORT")
-    if port == "" {
-        port = "3000"
-    }
-    log.Fatal(app.Listen(":" + port))
+	// Declare the app
+	app := fiber.New()
 
-    if err := ConnectDB(); err != nil {
-        log.Fatal(err)
-    }
+	// Routes
+	api := app.Group("/api/v1")
+	api.Post("/inventory/lock", LockInventory)
+	api.Post("/inventory/confirm", ConfirmInventory)
+	api.Post("/inventory/release", ReleaseInventory)
 
-    app := fiber.New()
+	// Listen on PORT
+	port := os.Getenv("PORT")
+	if port == "" {
+		port = "3000"
+	}
 
-    api := app.Group("/api/v1")
-    api.Post("/inventory/lock", LockInventory)
-    api.Post("/inventory/confirm", ConfirmInventory)
-    api.Post("/inventory/release", ReleaseInventory)
-
-    log.Fatal(app.Listen(":3000"))
+	log.Fatal(app.Listen(":" + port))
 }
