@@ -8,23 +8,21 @@ import (
 )
 
 func main() {
-
-	if err := ConnectDB(); err != nil {
-        log.Fatal("Database connection failed:", err)
-    }
-	// Declare the app
 	app := fiber.New()
 
-	// Routes
-	api := app.Group("/api/v1")
-	api.Post("/inventory/lock", LockInventory)
-	api.Post("/inventory/confirm", ConfirmInventory)
-	api.Post("/inventory/release", ReleaseInventory)
+	db := ConnectDB() // 🔴 MUST succeed or app exits
 
-	// Listen on PORT
+	handler := &Handler{DB: db}
+
+	app.Get("/health", func(c *fiber.Ctx) error {
+		return c.JSON(fiber.Map{"status": "ok"})
+	})
+
+	app.Post("/api/v1/inventory/lock", handler.LockInventory)
+
 	port := os.Getenv("PORT")
 	if port == "" {
-		port = "3000"
+		port = "8080"
 	}
 
 	log.Fatal(app.Listen(":" + port))
