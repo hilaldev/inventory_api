@@ -1,7 +1,5 @@
 package main
 
-//import "time"
-
 type LockRequest struct {
 	SKU      string `json:"sku"`
 	Quantity int    `json:"quantity"`
