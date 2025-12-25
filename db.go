@@ -10,24 +10,24 @@ import (
 )
 
 func ConnectDB() *pgxpool.Pool {
-    dsn := os.Getenv("DATABASE_URL")
-    if dsn == "" {
-        log.Fatal("DATABASE_URL not set")
-    }
-    log.Println("Connecting to database with:", dsn)
+	dsn := os.Getenv("DATABASE_URL")
+	if dsn == "" {
+		log.Fatal("DATABASE_URL is not set")
+	}
+	log.Println("Connecting to database with:", dsn)
 
-    ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-    defer cancel()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
 
-    pool, err := pgxpool.New(ctx, dsn)
-    if err != nil {
-        log.Fatal("pgxpool.New failed:", err)
-    }
+	pool, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		log.Fatal("Failed to create pool:", err)
+	}
 
-    if err := pool.Ping(ctx); err != nil {
-        log.Fatal("pgxpool.Ping failed:", err)
-    }
+	if err := pool.Ping(ctx); err != nil {
+		log.Fatal("Failed to ping database:", err)
+	}
 
-    log.Println("Database connected successfully")
-    return pool
+	log.Println("Database connected successfully")
+	return pool
 }
