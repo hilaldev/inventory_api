@@ -125,6 +125,8 @@ func StartTrafficMonitor() {
 	}
 }
 
+// StartJanitor: CRITICAL FIX APPLIED HERE
+// Uses aggregation (SUM) to handle multiple expiring locks for the same SKU correctly.
 func StartJanitor(db *pgxpool.Pool) {
 	ticker := time.NewTicker(5 * time.Second)
 	ctx := context.Background()
@@ -134,27 +136,34 @@ func StartJanitor(db *pgxpool.Pool) {
 			continue
 		}
 
-		// 1. Log Expired Items
+		// 1. Aggregate Expired Qty per SKU (The Fix)
+		// We calculate the total to release FIRST, then update the item ONCE.
+		_, err = tx.Exec(ctx, `
+			WITH expired_agg AS (
+				SELECT merchant_id, location_id, sku, SUM(qty) as total_qty_to_release
+				FROM inventory_locks
+				WHERE expires_at < NOW()
+				GROUP BY merchant_id, location_id, sku
+			)
+			UPDATE inventory_items ii
+			SET available_qty = available_qty + ea.total_qty_to_release,
+			    reserved_qty = reserved_qty - ea.total_qty_to_release
+			FROM expired_agg ea
+			WHERE ii.sku = ea.sku 
+			  AND ii.location_id = ea.location_id 
+			  AND ii.merchant_id = ea.merchant_id;
+		`)
+
+		// 2. Log Events (Optional, but good for auditing)
 		tx.Exec(ctx, `
 			INSERT INTO inventory_events (merchant_id, event_type, sku, change_qty, reason)
 			SELECT merchant_id, 'RELEASE', sku, qty, 'Expired TTL'
 			FROM inventory_locks WHERE expires_at < NOW()
 		`)
 
-		// 2. Return Stock to Available
-		_, err = tx.Exec(ctx, `
-			UPDATE inventory_items ii
-			SET available_qty = available_qty + il.qty,
-			    reserved_qty = reserved_qty - il.qty
-			FROM inventory_locks il
-			WHERE ii.sku = il.sku 
-			  AND ii.location_id = il.location_id 
-			  AND ii.merchant_id = il.merchant_id
-			  AND il.expires_at < NOW()
-		`)
-
 		// 3. Delete Locks
 		tx.Exec(ctx, "DELETE FROM inventory_locks WHERE expires_at < NOW()")
+
 		tx.Commit(ctx)
 	}
 }
