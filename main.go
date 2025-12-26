@@ -5,32 +5,41 @@ import (
 	"os"
 
 	"github.com/gofiber/fiber/v2"
+	"github.com/gofiber/fiber/v2/middleware/logger"
+	"github.com/gofiber/fiber/v2/middleware/recover"
 )
 
 func main() {
-	// Ensure DATABASE_URL exists
-	dsn := os.Getenv("DATABASE_URL")
-	if dsn == "" {
-		log.Fatal("DATABASE_URL is missing")
+	// 1. Environment Check
+	if os.Getenv("RAPIDAPI_SECRET") == "" {
+		log.Println("WARNING: RAPIDAPI_SECRET is missing. Requests will fail auth.")
 	}
-	log.Println("DATABASE_URL detected")
 
-	app := fiber.New()
-
+	// 2. Database & Workers
 	db := ConnectDB()
+	defer db.Close()
+
+	StartBackgroundWorkers(db)
+	go StartTrafficMonitor()
+
+	// 3. Web Server
+	app := fiber.New()
+	app.Use(logger.New())
+	app.Use(recover.New())
+
+	// 4. Routes
+	// All routes behind RapidAPI Auth & Bot Defense
+	api := app.Group("/api/v1", RapidAPIMiddleware(db), BotDefenseMiddleware())
+
 	handler := &Handler{DB: db}
+	
+	api.Post("/inventory/sync", handler.SyncInventory) // Setup Stock
+	api.Post("/inventory/lock", handler.LockInventory) // Reserve Stock
 
-	app.Get("/health", func(c *fiber.Ctx) error {
-		return c.JSON(fiber.Map{"status": "ok"})
-	})
-
-	app.Post("/api/v1/inventory/lock", handler.LockInventory)
-
+	// 5. Start
 	port := os.Getenv("PORT")
-	if port == "" {
-		port = "8080"
-	}
-
-	log.Println("Starting server on port", port)
+	if port == "" { port = "8080" }
+	
+	log.Println("Inventory API Live on port " + port)
 	log.Fatal(app.Listen(":" + port))
 }
