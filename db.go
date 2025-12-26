@@ -14,12 +14,20 @@ func ConnectDB() *pgxpool.Pool {
 	if dsn == "" {
 		log.Fatal("DATABASE_URL is not set")
 	}
-	log.Println("Connecting to database with:", dsn)
+
+	config, err := pgxpool.ParseConfig(dsn)
+	if err != nil {
+		log.Fatal("Failed to parse DB config:", err)
+	}
+
+	// Optimize connection pool for high traffic
+	config.MaxConns = 50
+	config.MinConns = 5
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	pool, err := pgxpool.New(ctx, dsn)
+	pool, err := pgxpool.NewWithConfig(ctx, config)
 	if err != nil {
 		log.Fatal("Failed to create pool:", err)
 	}
