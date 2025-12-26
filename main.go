@@ -10,33 +10,33 @@ import (
 )
 
 func main() {
-	// 1. Environment Check
 	if os.Getenv("RAPIDAPI_SECRET") == "" {
 		log.Println("WARNING: RAPIDAPI_SECRET is missing. Requests will fail auth.")
 	}
 
-	// 2. Database & Workers
+	// 1. Connect to DB
 	db := ConnectDB()
 	defer db.Close()
 
+	// 2. AUTO-MIGRATE (Runs the SQL automatically)
+	InitializeSchema(db)
+
+	// 3. Start Workers
 	StartBackgroundWorkers(db)
 	go StartTrafficMonitor()
 
-	// 3. Web Server
+	// 4. Start Web Server
 	app := fiber.New()
 	app.Use(logger.New())
 	app.Use(recover.New())
 
-	// 4. Routes
-	// All routes behind RapidAPI Auth & Bot Defense
 	api := app.Group("/api/v1", RapidAPIMiddleware(db), BotDefenseMiddleware())
 
 	handler := &Handler{DB: db}
 	
-	api.Post("/inventory/sync", handler.SyncInventory) // Setup Stock
-	api.Post("/inventory/lock", handler.LockInventory) // Reserve Stock
+	api.Post("/inventory/sync", handler.SyncInventory)
+	api.Post("/inventory/lock", handler.LockInventory)
 
-	// 5. Start
 	port := os.Getenv("PORT")
 	if port == "" { port = "8080" }
 	
