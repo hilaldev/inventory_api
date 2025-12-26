@@ -219,6 +219,15 @@ type CommitReq struct {
 }
 
 func SetupRoutes(app *fiber.App, db *pgxpool.Pool) {
+	// --- PUBLIC ENDPOINT (For RapidAPI Health Check) ---
+	app.Get("/ping", func(c *fiber.Ctx) error {
+		return c.Status(200).JSON(fiber.Map{
+			"status": "pong",
+			"service": "FlashLock API",
+			"timestamp": time.Now().Unix(),
+		})
+	})
+	
 	api := app.Group("/api/v1", RapidAPIMiddleware(db), BotDefense())
 
 	// A. ADMIN: SET STOCK (Reset/Init)
@@ -347,3 +356,4 @@ func main() {
 	}
 	log.Fatal(app.Listen(":" + port))
 }
+
