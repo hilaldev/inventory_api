@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"log"
 	"sync/atomic"
 	"time"
 
@@ -69,7 +68,7 @@ func janitorLoop(db *pgxpool.Pool) {
 
 		// 2. Delete Expired Locks
 		_, err = tx.Exec(ctx, "DELETE FROM inventory_locks WHERE expires_at < NOW()")
-		
+
 		tx.Commit(ctx)
 	}
 }
@@ -81,7 +80,7 @@ func syncEngineLoop(db *pgxpool.Pool) {
 
 	for range ticker.C {
 		rows, _ := db.Query(ctx, "SELECT id, target_platform, sku FROM sync_jobs WHERE status = 'PENDING' LIMIT 10")
-		
+
 		for rows.Next() {
 			var id int
 			var target, sku string
