@@ -71,7 +71,7 @@ func InitializeSchema(db *pgxpool.Pool) {
 		PRIMARY KEY (merchant_id, id)
 	);
 
-	-- INVENTORY ITEMS (Added is_backorderable)
+	-- INVENTORY ITEMS (Added is_backorderable & safety_stock)
 	CREATE TABLE IF NOT EXISTS inventory_items (
 		sku TEXT NOT NULL,
 		merchant_id UUID NOT NULL,
@@ -96,7 +96,6 @@ func InitializeSchema(db *pgxpool.Pool) {
 	);
 
 	-- LOCKS (Updated PK for Bundles)
-	-- Primary Key is (lock_id, sku) because one lock_id can hold multiple items
 	CREATE TABLE IF NOT EXISTS inventory_locks (
 		lock_id UUID NOT NULL,
 		merchant_id UUID NOT NULL,
@@ -182,7 +181,7 @@ func StartJanitor(db *pgxpool.Pool) {
 	}
 }
 
-// TriggerWebhook (New Feature)
+// TriggerWebhook
 func TriggerWebhook(db *pgxpool.Pool, merchantID, sku string, remaining int) {
 	go func() {
 		var url string
@@ -311,8 +310,9 @@ func SetupRoutes(app *fiber.App, db *pgxpool.Pool) {
 
 	api := app.Group("/api/v1", RapidAPIMiddleware(db), BotDefense())
 
-	// --- 1. CONFIGURATION ---
+	// --- 1. CONFIGURATION (Write & Read) ---
 
+	// Create Location
 	api.Post("/locations", func(c *fiber.Ctx) error {
 		mid := c.Locals("merchant_id").(string)
 		var req LocationReq
@@ -326,6 +326,24 @@ func SetupRoutes(app *fiber.App, db *pgxpool.Pool) {
 		return c.JSON(fiber.Map{"status": "created", "location_id": req.ID})
 	})
 
+	// List Locations
+	api.Get("/locations", func(c *fiber.Ctx) error {
+		mid := c.Locals("merchant_id").(string)
+		rows, err := db.Query(context.Background(), "SELECT id, name FROM locations WHERE merchant_id=$1", mid)
+		if err != nil {
+			return c.Status(500).SendString("DB Error")
+		}
+		defer rows.Close()
+		var locs []LocationReq
+		for rows.Next() {
+			var l LocationReq
+			rows.Scan(&l.ID, &l.Name)
+			locs = append(locs, l)
+		}
+		return c.JSON(locs)
+	})
+
+	// Create Bundle
 	api.Post("/bundles", func(c *fiber.Ctx) error {
 		mid := c.Locals("merchant_id").(string)
 		var req BundleReq
@@ -343,7 +361,25 @@ func SetupRoutes(app *fiber.App, db *pgxpool.Pool) {
 		return c.JSON(fiber.Map{"status": "bundle_created"})
 	})
 
-	// SET Webhook
+	// Get Bundle Details
+	api.Get("/bundles/:sku", func(c *fiber.Ctx) error {
+		mid := c.Locals("merchant_id").(string)
+		parentSku := c.Params("sku")
+		rows, err := db.Query(context.Background(), "SELECT child_sku, child_qty FROM bundles WHERE merchant_id=$1 AND parent_sku=$2", mid, parentSku)
+		if err != nil {
+			return c.Status(500).SendString("DB Error")
+		}
+		defer rows.Close()
+		components := make([]BundleComponent, 0)
+		for rows.Next() {
+			var c BundleComponent
+			rows.Scan(&c.SKU, &c.Qty)
+			components = append(components, c)
+		}
+		return c.JSON(components)
+	})
+
+	// Set Webhook
 	api.Post("/config/webhook", func(c *fiber.Ctx) error {
 		mid := c.Locals("merchant_id").(string)
 		var req WebhookReq
@@ -354,7 +390,7 @@ func SetupRoutes(app *fiber.App, db *pgxpool.Pool) {
 		return c.JSON(fiber.Map{"status": "webhook_set", "url": req.URL})
 	})
 
-	// GET Webhook
+	// Get Webhook
 	api.Get("/config/webhook", func(c *fiber.Ctx) error {
 		mid := c.Locals("merchant_id").(string)
 		var url string
@@ -526,7 +562,10 @@ func SetupRoutes(app *fiber.App, db *pgxpool.Pool) {
 
 	api.Get("/locations", func(c *fiber.Ctx) error {
 		mid := c.Locals("merchant_id").(string)
-		rows, _ := db.Query(context.Background(), "SELECT id, name FROM locations WHERE merchant_id=$1", mid)
+		rows, err := db.Query(context.Background(), "SELECT id, name FROM locations WHERE merchant_id=$1", mid)
+		if err != nil {
+			return c.Status(500).SendString("DB Error")
+		}
 		defer rows.Close()
 		var locs []LocationReq
 		for rows.Next() {
