@@ -4,6 +4,7 @@ import (
 	"context"
 	"log"
 	"os"
+	"strconv"
 	"sync/atomic"
 	"time"
 
@@ -45,7 +46,7 @@ func ConnectDB() *pgxpool.Pool {
 }
 
 func InitializeSchema(db *pgxpool.Pool) {
-	log.Println("Initializing Headless Schema...")
+	log.Println("Initializing Schema...")
 	sql := `
 	CREATE EXTENSION IF NOT EXISTS "pgcrypto";
 
@@ -125,8 +126,7 @@ func StartTrafficMonitor() {
 	}
 }
 
-// StartJanitor: CRITICAL FIX APPLIED HERE
-// Uses aggregation (SUM) to handle multiple expiring locks for the same SKU correctly.
+// StartJanitor: UPDATED WITH AGGREGATION FIX
 func StartJanitor(db *pgxpool.Pool) {
 	ticker := time.NewTicker(5 * time.Second)
 	ctx := context.Background()
@@ -154,7 +154,7 @@ func StartJanitor(db *pgxpool.Pool) {
 			  AND ii.merchant_id = ea.merchant_id;
 		`)
 
-		// 2. Log Events (Optional, but good for auditing)
+		// 2. Log Events
 		tx.Exec(ctx, `
 			INSERT INTO inventory_events (merchant_id, event_type, sku, change_qty, reason)
 			SELECT merchant_id, 'RELEASE', sku, qty, 'Expired TTL'
@@ -193,7 +193,7 @@ func RapidAPIMiddleware(db *pgxpool.Pool) fiber.Handler {
 			// Create Merchant & Default Location
 			tx, _ := db.Begin(ctx)
 			tx.QueryRow(ctx, "INSERT INTO merchants (name, rapidapi_user) VALUES ($1, $2) RETURNING id", "User "+user, user).Scan(&merchantID)
-			tx.Exec(ctx, "INSERT INTO locations (id, merchant_id, name) VALUES ('default', $1, 'Main')", merchantID)
+			tx.Exec(ctx, "INSERT INTO locations (id, merchant_id, name) VALUES ('default', $1, 'Main Warehouse')", merchantID)
 			tx.Commit(ctx)
 		}
 		c.Locals("merchant_id", merchantID)
@@ -212,19 +212,48 @@ func BotDefense() fiber.Handler {
 	}
 }
 
-// --- 5. HANDLERS (The Headless Logic) ---
+// --- 5. MODELS & HANDLERS ---
 
-// REQUEST MODELS
+// Request Models
+type LocationReq struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
+}
 type StockUpdate struct {
-	SKU string `json:"sku"`
-	Qty int    `json:"quantity"`
+	SKU        string `json:"sku"`
+	Qty        int    `json:"quantity"`
+	LocationID string `json:"location_id"`
 }
 type LockReq struct {
-	SKU string `json:"sku"`
-	Qty int    `json:"quantity"`
+	SKU        string `json:"sku"`
+	Qty        int    `json:"quantity"`
+	LocationID string `json:"location_id"`
 }
 type CommitReq struct {
 	LockID string `json:"lock_id"`
+}
+
+// Response Models
+type InventoryItem struct {
+	LocationID   string    `json:"location_id"`
+	SKU          string    `json:"sku"`
+	TotalQty     int       `json:"total_qty"`
+	ReservedQty  int       `json:"reserved_qty"`
+	AvailableQty int       `json:"available_qty"`
+	UpdatedAt    time.Time `json:"updated_at"`
+}
+type ActiveLock struct {
+	LockID     string    `json:"lock_id"`
+	LocationID string    `json:"location_id"`
+	SKU        string    `json:"sku"`
+	Qty        int       `json:"qty"`
+	ExpiresAt  time.Time `json:"expires_at"`
+}
+type InventoryEvent struct {
+	EventType string    `json:"event_type"`
+	ChangeQty int       `json:"change_qty"`
+	Reason    string    `json:"reason"`
+	CreatedAt time.Time `json:"created_at"`
 }
 
 func SetupRoutes(app *fiber.App, db *pgxpool.Pool) {
@@ -239,7 +268,42 @@ func SetupRoutes(app *fiber.App, db *pgxpool.Pool) {
 
 	api := app.Group("/api/v1", RapidAPIMiddleware(db), BotDefense())
 
-	// A. ADMIN: SET STOCK (Reset/Init)
+	// --- 1. LOCATIONS MANAGEMENT ---
+
+	// Create Location
+	api.Post("/locations", func(c *fiber.Ctx) error {
+		mid := c.Locals("merchant_id").(string)
+		var req LocationReq
+		if err := c.BodyParser(&req); err != nil {
+			return c.Status(400).SendString("Bad Body")
+		}
+
+		_, err := db.Exec(context.Background(),
+			"INSERT INTO locations (id, merchant_id, name) VALUES ($1, $2, $3) ON CONFLICT (merchant_id, id) DO UPDATE SET name=$3",
+			req.ID, mid, req.Name)
+		if err != nil {
+			return c.Status(500).SendString(err.Error())
+		}
+		return c.JSON(fiber.Map{"status": "created", "location_id": req.ID})
+	})
+
+	// List Locations
+	api.Get("/locations", func(c *fiber.Ctx) error {
+		mid := c.Locals("merchant_id").(string)
+		rows, _ := db.Query(context.Background(), "SELECT id, name FROM locations WHERE merchant_id=$1", mid)
+		defer rows.Close()
+		var locs []LocationReq
+		for rows.Next() {
+			var l LocationReq
+			rows.Scan(&l.ID, &l.Name)
+			locs = append(locs, l)
+		}
+		return c.JSON(locs)
+	})
+
+	// --- 2. WRITE ENDPOINTS ---
+
+	// Sync Stock (supports location_id)
 	api.Post("/inventory/sync", func(c *fiber.Ctx) error {
 		mid := c.Locals("merchant_id").(string)
 		var req StockUpdate
@@ -247,28 +311,38 @@ func SetupRoutes(app *fiber.App, db *pgxpool.Pool) {
 			return c.Status(400).SendString("Bad Body")
 		}
 
+		loc := req.LocationID
+		if loc == "" {
+			loc = "default"
+		} // Default fallback
+
 		// Upsert Item (available = total - reserved)
 		// This respects existing locks even during a reset
 		query := `
 			INSERT INTO inventory_items (sku, merchant_id, location_id, total_qty, available_qty)
-			VALUES ($1, $2, 'default', $3, $3)
+			VALUES ($1, $2, $3, $4, $4)
 			ON CONFLICT (merchant_id, location_id, sku) DO UPDATE SET 
-			total_qty = $3, available_qty = $3 - inventory_items.reserved_qty
+			total_qty = $4, available_qty = $4 - inventory_items.reserved_qty
 		`
-		_, err := db.Exec(context.Background(), query, req.SKU, mid, req.Qty)
+		_, err := db.Exec(context.Background(), query, req.SKU, mid, loc, req.Qty)
 		if err != nil {
-			return c.Status(500).SendString(err.Error())
+			return c.Status(500).SendString("Error syncing. Does location exist?")
 		}
 
-		return c.JSON(fiber.Map{"status": "updated", "sku": req.SKU})
+		return c.JSON(fiber.Map{"status": "updated", "sku": req.SKU, "location": loc})
 	})
 
-	// B. USER: LOCK (Add to Cart)
+	// LOCK (Add to Cart - supports location_id)
 	api.Post("/inventory/lock", func(c *fiber.Ctx) error {
 		mid := c.Locals("merchant_id").(string)
 		var req LockReq
 		if err := c.BodyParser(&req); err != nil {
 			return c.Status(400).SendString("Bad Body")
+		}
+
+		loc := req.LocationID
+		if loc == "" {
+			loc = "default"
 		}
 
 		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
@@ -279,8 +353,8 @@ func SetupRoutes(app *fiber.App, db *pgxpool.Pool) {
 		// Atomic Decrement
 		tag, err := tx.Exec(ctx, `
 			UPDATE inventory_items SET available_qty = available_qty - $1, reserved_qty = reserved_qty + $1 
-			WHERE sku = $2 AND merchant_id = $3 AND location_id = 'default' 
-			AND (available_qty - safety_stock) >= $1`, req.Qty, req.SKU, mid)
+			WHERE sku = $2 AND merchant_id = $3 AND location_id = $4 
+			AND (available_qty - safety_stock) >= $1`, req.Qty, req.SKU, mid, loc)
 
 		if err != nil || tag.RowsAffected() == 0 {
 			return c.Status(409).JSON(fiber.Map{"error": "Oversold"})
@@ -294,14 +368,14 @@ func SetupRoutes(app *fiber.App, db *pgxpool.Pool) {
 		} // 2 mins if bot attack
 		exp := time.Now().Add(time.Duration(ttl) * time.Second)
 
-		tx.Exec(ctx, `INSERT INTO inventory_locks (lock_id, merchant_id, sku, location_id, qty, expires_at) VALUES ($1, $2, $3, 'default', $4, $5)`, lockID, mid, req.SKU, req.Qty, exp)
+		tx.Exec(ctx, `INSERT INTO inventory_locks (lock_id, merchant_id, sku, location_id, qty, expires_at) VALUES ($1, $2, $3, $4, $5, $6)`, lockID, mid, req.SKU, loc, req.Qty, exp)
 		tx.Exec(ctx, `INSERT INTO inventory_events (merchant_id, event_type, sku, change_qty, reason) VALUES ($1, 'LOCK', $2, $3, 'Cart Add')`, mid, req.SKU, req.Qty)
 
 		tx.Commit(ctx)
-		return c.JSON(fiber.Map{"lock_id": lockID, "expires_at": exp})
+		return c.JSON(fiber.Map{"lock_id": lockID, "expires_at": exp, "location": loc})
 	})
 
-	// C. SYSTEM: COMMIT (Payment Success - Finalize Sale)
+	// COMMIT (Payment Success - Finalize Sale)
 	api.Post("/inventory/commit", func(c *fiber.Ctx) error {
 		mid := c.Locals("merchant_id").(string)
 		var req CommitReq
@@ -314,19 +388,18 @@ func SetupRoutes(app *fiber.App, db *pgxpool.Pool) {
 		tx, _ := db.Begin(ctx)
 		defer tx.Rollback(ctx)
 
-		// 1. Get Lock Details
-		var sku string
+		// 1. Get Lock Details (Now includes location_id)
+		var sku, loc string
 		var qty int
-		err := tx.QueryRow(ctx, "SELECT sku, qty FROM inventory_locks WHERE lock_id = $1 AND merchant_id = $2", req.LockID, mid).Scan(&sku, &qty)
+		err := tx.QueryRow(ctx, "SELECT sku, qty, location_id FROM inventory_locks WHERE lock_id = $1 AND merchant_id = $2", req.LockID, mid).Scan(&sku, &qty, &loc)
 		if err != nil {
 			return c.Status(404).JSON(fiber.Map{"error": "Lock not found or expired"})
 		}
 
 		// 2. Reduce Total Qty (Permanent Sale), Reduce Reserved Qty (Clear hold)
-		// Note: We do NOT add back to Available. It is gone.
 		_, err = tx.Exec(ctx, `
 			UPDATE inventory_items SET total_qty = total_qty - $1, reserved_qty = reserved_qty - $1 
-			WHERE sku = $2 AND merchant_id = $3 AND location_id = 'default'`, qty, sku, mid)
+			WHERE sku = $2 AND merchant_id = $3 AND location_id = $4`, qty, sku, mid, loc)
 
 		// 3. Delete Lock
 		tx.Exec(ctx, "DELETE FROM inventory_locks WHERE lock_id = $1", req.LockID)
@@ -336,6 +409,82 @@ func SetupRoutes(app *fiber.App, db *pgxpool.Pool) {
 
 		tx.Commit(ctx)
 		return c.JSON(fiber.Map{"status": "sold", "sku": sku})
+	})
+
+	// --- 3. READ ENDPOINTS ---
+
+	// Get Inventory (Now returns array of locations)
+	api.Get("/inventory/:sku", func(c *fiber.Ctx) error {
+		mid := c.Locals("merchant_id").(string)
+		sku := c.Params("sku")
+
+		rows, err := db.Query(context.Background(),
+			"SELECT location_id, total_qty, reserved_qty, available_qty, updated_at FROM inventory_items WHERE sku=$1 AND merchant_id=$2",
+			sku, mid,
+		)
+		if err != nil {
+			return c.Status(500).SendString("DB Error")
+		}
+		defer rows.Close()
+
+		items := make([]InventoryItem, 0)
+		for rows.Next() {
+			var i InventoryItem
+			i.SKU = sku
+			rows.Scan(&i.LocationID, &i.TotalQty, &i.ReservedQty, &i.AvailableQty, &i.UpdatedAt)
+			items = append(items, i)
+		}
+
+		return c.JSON(items)
+	})
+
+	// Get Locks
+	api.Get("/locks", func(c *fiber.Ctx) error {
+		mid := c.Locals("merchant_id").(string)
+		limit, _ := strconv.Atoi(c.Query("limit", "20"))
+		offset, _ := strconv.Atoi(c.Query("offset", "0"))
+
+		rows, err := db.Query(context.Background(),
+			"SELECT lock_id, location_id, sku, qty, expires_at FROM inventory_locks WHERE merchant_id=$1 ORDER BY created_at DESC LIMIT $2 OFFSET $3",
+			mid, limit, offset,
+		)
+		if err != nil {
+			return c.Status(500).SendString("DB Error")
+		}
+		defer rows.Close()
+
+		locks := make([]ActiveLock, 0)
+		for rows.Next() {
+			var lock ActiveLock
+			rows.Scan(&lock.LockID, &lock.LocationID, &lock.SKU, &lock.Qty, &lock.ExpiresAt)
+			locks = append(locks, lock)
+		}
+		return c.JSON(locks)
+	})
+
+	// Get History
+	api.Get("/inventory/:sku/history", func(c *fiber.Ctx) error {
+		mid := c.Locals("merchant_id").(string)
+		sku := c.Params("sku")
+		limit, _ := strconv.Atoi(c.Query("limit", "50"))
+		offset, _ := strconv.Atoi(c.Query("offset", "0"))
+
+		rows, err := db.Query(context.Background(),
+			"SELECT event_type, change_qty, reason, created_at FROM inventory_events WHERE merchant_id=$1 AND sku=$2 ORDER BY created_at DESC LIMIT $3 OFFSET $4",
+			mid, sku, limit, offset,
+		)
+		if err != nil {
+			return c.Status(500).SendString("DB Error")
+		}
+		defer rows.Close()
+
+		events := make([]InventoryEvent, 0)
+		for rows.Next() {
+			var event InventoryEvent
+			rows.Scan(&event.EventType, &event.ChangeQty, &event.Reason, &event.CreatedAt)
+			events = append(events, event)
+		}
+		return c.JSON(events)
 	})
 }
 
